@@ -2,10 +2,7 @@
 
 // libraries
 #include <Wire.h>
-#include <SPI.h>
-#include <nRF24L01.h>
 #include <RF24.h>
-#include <Arduino.h>
 #include <Servo.h>
 #include <math.h>
 #include <stdint.h>
@@ -16,7 +13,7 @@ Adafruit_BMP280 bmp;
 
 // addresses
 #define MPU_ADDR 0x68
-#define BMP_ADDR 0x76 // change to 0x77 if fails
+#define BMP_ADDR 0x76
 
 // pins
 #define led_g 3
