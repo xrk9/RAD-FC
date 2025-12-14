@@ -27,6 +27,11 @@ Adafruit_BMP280 bmp;
 #define br 9   // back right
 #define bl 10  // back left
 
+// loop timer
+#define LOOP_0 2000 // FC and gyro // 1_000_000 / 500 = 2_000US
+#define LOOP_1 10000 // Acc angle calc and RC input receive // 1_000_000 / 100 = 10_000
+#define LOOP_Baro 40000 // 1_000_000 / 25 = 40_000
+
 // Servo
 Servo escFL, escFR, escBL, escBR;
 
@@ -56,20 +61,19 @@ float gx = 0.0f, gy = 0.0f, gz = 0.0f; // in deg/s
 
 // gyro and acc offsets (raw)
 float gx_offset = -151.0f, gy_offset = -3.0f, gz_offset = -39.0f;
-float ax_offset = 137.0f, ay_offset = -181.0f, az_offset = -1346.0f; // update -----------------------------
+float ax_offset = 137.0f, ay_offset = -181.0f, az_offset = -1346.0f; // update later if needed
 
 // Angles
 float RollAngle = 0.0f, PitchAngle = 0.0f;
 float accelRollAngle = 0.0f, accelPitchAngle = 0.0f;
 
-// Other (Kalman)
+// dt
 unsigned long lastMicros = 0;
 unsigned long nowMicros = 0;
 float dt = 0.0f;
 
 // vertical volocity by mpu
 float AccZInertial = 0.0f;
-float VelocityVertical = 0.0f;
 
 // barometer
 float baselinePressure = 0;
@@ -85,7 +89,7 @@ float throttle = 0.0f, pitch = 0.0f, roll = 0.0f, yaw = 0.0f;
 float w_max = 0.0f;
 float angleErr = 0.0f , rateErr = 0.0f;
 float pitchRate = 0.0f, rollRate = 0.0f, yawRate = 0.0f;  // measured
-float alpha = 0.3f;
+float alpha = 0.2f;
 float Pot1 = 0.0f, Pot2= 0.0f;
 float Kp = 0.0015f, Kr = 0.0015f, Ky = 0.0007f, Kt = 0.4f;
 
@@ -98,7 +102,6 @@ float Kp = 0.0015f, Kr = 0.0015f, Ky = 0.0007f, Kt = 0.4f;
 float Q_v   = 0.03f;   // process noise for velocity state (m^2/s^4) - small
 float Q_b   = 0.0005f; // process noise for bias (m^2/s^2) - how fast bias can change
 float R_baro = 0.5f;   // baro velocity measurement variance (m^2/s^2). tune upward if baro noisy
-float R_mpu  = 0.8f;   // mpu velocity measurement variance (m^2/s^2). tune
 
 // Kalman state
 float xv = 0.0f; // estimated velocity (m/s)
@@ -188,6 +191,7 @@ void startListening(){
 
   radio.openReadingPipe(0, address);
   radio.startListening(); //  Set the module as receiver
+  radio.writeAckPayload(0, &ringBuzzerFor, sizeof(ringBuzzerFor));
   resetData();
 }
 
@@ -196,28 +200,31 @@ void startListening(){
 // if connection lost for more than 1 second -> reset data;
 // if connection lost for more than 15 seconds -> land down the drone;
 // red light if nrf fails
-void read_receiver(){
+void read_receiver() {
+
+  // ---- PRELOAD ACK PAYLOAD (CRITICAL) ----
+  radio.writeAckPayload(0, &ringBuzzerFor, sizeof(ringBuzzerFor));
+  ringBuzzerFor = 0;   // clear after loading
+
+  // ---- RECEIVE DATA ----
   if (radio.available()) {
 
     radio.read(&data, sizeof(Data_Package));
-
-    if(ringBuzzerFor>0){
-      radio.writeAckPayload(0,&ringBuzzerFor, sizeof(ringBuzzerFor));
-      ringBuzzerFor = 0;
-    }
-
     lastReceiveTimeRadio = millis();
-
   }
+
   currentTimeRadio = millis();
-  // if no signal for 1 second, reset Data, that is connection lost.
-  if ( currentTimeRadio - lastReceiveTimeRadio > 1000 ) {
+
+  // ---- FAILSAFE ----
+  if (currentTimeRadio - lastReceiveTimeRadio > 1000) {
     resetData();
-    if (  currentTimeRadio - lastReceiveTimeRadio > 15000 ){
+
+    if (currentTimeRadio - lastReceiveTimeRadio > 15000) {
       bring_down = true;
     }
   }
 }
+
 // --- xxx ---
 
 // --- Get Angle ---
@@ -253,10 +260,10 @@ void beginBMP(){
   // Lower noise configuration
   bmp.setSampling(
     Adafruit_BMP280::MODE_NORMAL,
-    Adafruit_BMP280::SAMPLING_X16,   // Temp oversampling
-    Adafruit_BMP280::SAMPLING_X16,   // Pressure oversampling
-    Adafruit_BMP280::FILTER_X16,     // Strong internal filter
-    Adafruit_BMP280::STANDBY_MS_63   // ~1000 Hz loop
+    Adafruit_BMP280::SAMPLING_X1,   // Temp oversampling
+    Adafruit_BMP280::SAMPLING_X4,   // Pressure oversampling
+    Adafruit_BMP280::FILTER_X8,     // Strong internal filter
+    Adafruit_BMP280::STANDBY_MS_1   // ~1000 Hz loop
   );
   
   delay(3000);
@@ -418,23 +425,21 @@ void getAngle(){
   // Compute accel angles (deg)
   // Roll: rotation around X axis, Pitch: rotation around Y axis
   // Note: choice of signs depends on sensor orientation on your frame
-  accelRollAngle  = atan2f(ay, sqrtf(ay*ay + az*az)) * 180.0f / PI; // -ax used to maintain coordinate convention
-  accelPitchAngle = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / PI;
-
+  accelRollAngle  = atan2f(ay, sqrtf(ay*ay + az*az)) * 180.0f / PI; 
+  accelPitchAngle = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / PI; // -ax used to maintain coordinate convention
   // Update Kalman filters using gyro rates (deg/s) and accel angles (deg)
   RollAngle  = kalmanUpdate(kalRoll, gx, accelRollAngle, dt);
   PitchAngle = kalmanUpdate(kalPitch, gy, accelPitchAngle, dt);
 
-  rollRate = alpha*pitchRate + (1.0f-alpha)*gx;
-  pitchRate = alpha*rollRate + (1.0f-alpha)*gy;
+  rollRate = alpha*rollRate + (1.0f-alpha)*gx;
+  pitchRate = alpha*pitchRate + (1.0f-alpha)*gy;
   yawRate = alpha*yawRate + (1.0f-alpha)*gz;
 
   AccZInertial=-sin(PitchAngle*(PI/180))*ax+cos(PitchAngle*(PI/180))*sin(RollAngle*(PI/180))* ay+cos(PitchAngle*(PI/180))*cos(RollAngle*(PI/180))*az;   
   AccZInertial=(AccZInertial-1)*9.81*100;
-  VelocityVertical = VelocityVertical + dt * AccZInertial;
 
-  Serial.print("  || VVelocity: ");
-  Serial.println(xv);
+  // Serial.print("  || VVelocity: ");
+  // Serial.println(xv);
 
 }
 
@@ -456,103 +461,51 @@ void iniitalKalmanFilter(){
 
 // Kalman update: acc_meas (m/s^2), v_baro (m/s), v_mpu (m/s), dt (s)
 // new
-void kalman_update(float acc_meas, float v_baro, float v_mpu, float dt) {
+void kalman_update(float acc_meas, float v_baro, float dt) {
   // ----- PREDICT -----
-  // State transition matrix F = [1  -dt; 0 1]  (see derivation in explanation)
-  // Control (acceleration) enters as + a*dt to v
-  // Predicted state:
-  float v_pred = xv + (acc_meas - xb) * dt;  // note: -xb because bias subtracts from acc->vel
-  float b_pred = xb; // random walk
+  float v_pred = xv + (acc_meas - xb) * dt;
+  float b_pred = xb;
 
-  // Jacobian F applied to P: P = F*P*F^T + Q
-  // Here F = [[1, -dt],[0,1]]
-  // Compute P_pred manually:
-  float P00_p = P00 + dt * (P10 - P01) + dt*dt * P11 + Q_v;
-  float P01_p = P01 - dt * P11;
-  float P10_p = P10 - dt * P11;
+  float P00_p = P00 + dt * (P10 + P01) + dt*dt * P11 + Q_v;
+  float P01_p = P01 + dt * P11;
+  float P10_p = P10 + dt * P11;
   float P11_p = P11 + Q_b;
 
-  // ----- MEASUREMENT UPDATE (two measurements stacked) -----
-  // H = [[1,0],[1,1]]
-  // z = [v_baro, v_mpu]^T
-  // S = H*P_pred*H^T + R (2x2)
-  // Compute S:
-  // H*P*H^T = [ P00_p, P00_p + P01_p; P00_p + P10_p, P00_p + P01_p + P10_p + P11_p ]
-  float S00 = P00_p + R_baro;
-  float S01 = P00_p + P01_p;            // + 0 for R cross (R is diagonal)
-  float S10 = P00_p + P10_p;
-  float S11 = P00_p + P01_p + P10_p + P11_p + R_mpu;
+  // ----- MEASUREMENT UPDATE (baro velocity) -----
+  // H = [1 0]
+  // z = v_baro
 
-  // Invert S (2x2)
-  float iS00, iS01, iS10, iS11;
-  if (!invert2x2(S00, S01, S10, S11, iS00, iS01, iS10, iS11)) {
-    // fallback: skip update if singular
+  float y = v_baro - v_pred;     // surprise / residual
+  float S = P00_p + R_baro;      // scalar innovation
+
+  if (S < 1e-9f) {
     xv = v_pred; xb = b_pred;
     P00 = P00_p; P01 = P01_p; P10 = P10_p; P11 = P11_p;
     return;
   }
 
-  // Compute K = P_pred * H^T * inv(S)
-  // P_pred * H^T = [ [P00_p, P00_p + P01_p], [P10_p, P10_p + P11_p] ]
-  // multiply that 2x2 by inv(S) to get K (2x2)
-  float A00 = P00_p, A01 = P00_p + P01_p;
-  float A10 = P10_p, A11 = P10_p + P11_p;
+  float invS = 1.0f / S;
 
-  // K = A * iS
-  float K00 = A00 * iS00 + A01 * iS10;
-  float K01 = A00 * iS01 + A01 * iS11;
-  float K10 = A10 * iS00 + A11 * iS10;
-  float K11 = A10 * iS01 + A11 * iS11;
+  // Kalman gains
+  float K0 = P00_p * invS;   // for velocity
+  float K1 = P10_p * invS;   // for bias
 
-  // Measurement residual y = z - H*x_pred
-  float z0 = v_baro;
-  float z1 = v_mpu;
-  // H*x_pred = [v_pred; v_pred + b_pred]
-  float y0 = z0 - v_pred;
-  float y1 = z1 - (v_pred + b_pred);
+  // State update
+  xv = v_pred + K0 * y;
+  xb = b_pred + K1 * y;
 
-  // Update state: x = x_pred + K * y
-  xv = v_pred + K00 * y0 + K01 * y1;
-  xb = b_pred + K10 * y0 + K11 * y1;
+  // Covariance update (Joseph form simplified)
+  float P00_new = (1.0f - K0) * P00_p;
+  float P01_new = (1.0f - K0) * P01_p;
+  float P10_new = P10_p - K1 * P00_p;
+  float P11_new = P11_p - K1 * P01_p;
 
-  // Update P: P = (I - K*H) * P_pred
-  // Compute K*H:
-  // K*H = [ [K00+K01, K01], [K10+K11, K11] ]? let's compute directly above:
-  float KH00 = K00 + K01; // row0 * col0 of H (1,1)?? check: H = [[1,0],[1,1]] so
-  // Actually compute (K*H) elementwise:
-  // (K*H)[0,0] = K00*1 + K01*1 = K00 + K01
-  // (K*H)[0,1] = K00*0 + K01*1 = K01
-  // (K*H)[1,0] = K10 + K11
-  // (K*H)[1,1] = K11
-  float KH01 = K01;
-  float KH10 = K10 + K11;
-  float KH11 = K11;
-
-  // I - K*H:
-  float M00 = 1.0f - KH00;
-  float M01 = 0.0f - KH01;
-  float M10 = 0.0f - KH10;
-  float M11 = 1.0f - KH11;
-
-  // P_new = (I-KH) * P_pred
-  float newP00 = M00 * P00_p + M01 * P10_p;
-  float newP01 = M00 * P01_p + M01 * P11_p;
-  float newP10 = M10 * P00_p + M11 * P10_p;
-  float newP11 = M10 * P01_p + M11 * P11_p;
-
-  P00 = newP00; P01 = newP01; P10 = newP10; P11 = newP11;
+  P00 = P00_new;
+  P01 = P01_new;
+  P10 = P10_new;
+  P11 = P11_new;
 }
-// --- helper: invert 2x2 matrix
-bool invert2x2(float a, float b, float c, float d, float &ia, float &ib, float &ic, float &id) {
-  float det = a*d - b*c;
-  if (fabs(det) < 1e-12f) return false;
-  float inv = 1.0f / det;
-  ia =  d * inv;
-  ib = -b * inv;
-  ic = -c * inv;
-  id =  a * inv;
-  return true;
-}
+
 
 float lastBaroAlt = 0.0f;
 float lastBaroTime = 0.0f;
@@ -658,7 +611,7 @@ void readBMP(){
 
 }
 
-// provides the milis valuees
+// provides the milis valuees for esc
 void get_milis(){
   
   // for pitch 
@@ -718,7 +671,7 @@ void errChk(){
 
 void setup() { // ------------------------------------------
 
-  Serial.begin(9600);
+  // Serial.begin(9600);
   lastMicros_new = micros();
 
   pinMode(led_g, OUTPUT);
@@ -740,12 +693,12 @@ void setup() { // ------------------------------------------
   */
 
   beginBMP();
-  Serial.println("Begin Calibration");
+  // Serial.println("Begin Calibration");
   calibrateGyro();
 
 
   if(!bmp.begin(BMP_ADDR) || !readMPUraw() ){
-    Serial.print("liuyugyiug");
+    // Serial.print("liuyugyiug");
 
     digitalWrite(led_g,HIGH);
     digitalWrite(led_r,HIGH);
@@ -758,7 +711,7 @@ void setup() { // ------------------------------------------
   armESC();
   digitalWrite(led_g, HIGH);
 
-  ringBuzzerFor = 1000;
+  ringBuzzerFor = 1500;
   read_receiver();
 
   digitalWrite(led_r, LOW);
@@ -810,7 +763,7 @@ void loop() {
   v_mpu *= mpu_integ_decay;
 
   // --- call kalman update
-  kalman_update(acc_z_world, v_baro, v_mpu, dt);
+  kalman_update(acc_z_world, v_baro, dt);
 
 
 
@@ -838,15 +791,15 @@ void loop() {
     digitalWrite(led_r,LOW);
     return;
   }
-  */
+  */ 
   
-  Serial.print("  Throttle: ");
-  Serial.print(throttle);
-  Serial.print("  Roll: ");
-  Serial.print(roll);
-  Serial.print("  Pitch: ");
-  Serial.print(pitch);
-  Serial.print("  Yaw: ");
-  Serial.print(yaw);
+  // Serial.print("  Throttle: ");
+  // Serial.print(throttle);
+  // Serial.print("  Roll: ");  
+  // Serial.print(roll);
+  // Serial.print("  Pitch: ");
+  // Serial.print(pitch);
+  // Serial.print("  Yaw: ");
+  // Serial.print(yaw);
 }
 // --- xxx ---
