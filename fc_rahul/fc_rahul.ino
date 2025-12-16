@@ -32,6 +32,9 @@ Adafruit_BMP280 bmp;
 #define LOOP_1 10000 // Acc angle calc and RC input receive // 1_000_000 / 100 = 10_000
 #define LOOP_Baro 40000 // 1_000_000 / 25 = 40_000
 
+// loop timer
+unsigned long last_0 = 0, last_1 = 0, last_baro = 0;
+
 // Servo
 Servo escFL, escFR, escBL, escBR;
 
@@ -41,7 +44,7 @@ struct Data_Package;
 struct Target;
 struct Input;
 
-// NRF24L01
+// NRF24L01 radio
 unsigned long lastReceiveTimeRadio = 0;
 unsigned long currentTimeRadio = 0;
 int16_t ringBuzzerFor = 0;
@@ -98,7 +101,7 @@ float Kp = 0.0015f, Kr = 0.0015f, Ky = 0.0007f, Kt = 0.4f;
 
 
 
-// Tuning (start here)
+// Tuning
 float Q_v   = 0.03f;   // process noise for velocity state (m^2/s^4) - small
 float Q_b   = 0.0005f; // process noise for bias (m^2/s^2) - how fast bias can change
 float R_baro = 0.5f;   // baro velocity measurement variance (m^2/s^2). tune upward if baro noisy
