@@ -4,9 +4,9 @@
 #include <Wire.h>             // for MPU
 #include <RF24.h>             // for NRF24L01
 #include <Servo.h>            // for esc
-#include <math.h>             // utilities
-#include <stdint.h>           // utilities
-#include <Adafruit_BMP280.h>  // bmp
+#include <math.h>             // for trignometry
+#include <stdint.h>           // for standard integers
+#include <Adafruit_BMP280.h>  // for BMP 280
 
 // Addresses for I2C
 #define MPU_ADDR 0x68 // MPU address
@@ -32,14 +32,20 @@
 // Adafruit Barometer Object
 Adafruit_BMP280 bmp;
 
-// Loop Last Timer (micros)
+// Loop 
+unsigned long loop_0 = 0, loop_1 = 0, loop_baro = 0;
+
+// Last Loop Timer (micros)
 unsigned long last_0 = 0, last_1 = 0, last_baro = 0; // last time for loop_0, loop_1 and loop_baro respectively at 500, 100, 25Hz respectively
 
 // Servo Object
 Servo escFL, escFR, escBL, escBR;
 
 // Struct Declaration
-struct KalmanA, KalmanB, Data_Package, Target;
+struct KalmanA;
+struct KalmanB;
+struct Data_Package;
+struct Target;
 
 // NRF24L01 radio (micros)
 unsigned long lastReceiveTimeRadio = 0; // last radio received time
@@ -185,7 +191,7 @@ void read_receiver() {
     lastReceiveTimeRadio = millis();
   }
 
-  currentTimeRadio = millis();
+  unsigned long currentTimeRadio = millis();
 
   // failsafe and bring down
   if (currentTimeRadio - lastReceiveTimeRadio > 1000) {
@@ -232,7 +238,7 @@ bool beginMPU(){
   // Serial.begin(115200);
   delay(200);
 
-  if(readRegister(MPU_ADDR, 0x75) != 0x68) return false;
+  if(Wire.read(MPU_ADDR, 0x75) != 0x68) return false;
 
   // Wake up
   writeMPU(0x6B, 0x00); // PWR_MGMT_1: clear sleep
@@ -329,12 +335,12 @@ bool readAccelRaw(){
   return true;
 }
 
-// calculates the gyro offsets and set baseline pressure from baro
+// calculates the gyro offsets, set inertial acceleration and baseline pressure from baro
 void calibrate() {
   // Gyro Calibration
   const int calSamples = 2000;
   long sumGX = 0, sumGY = 0, sumGZ = 0;  // Store gyrro values
-  long sumAX = 0, sumAY = 0, sumAZ = 0;  // Store gyrro values
+  long sumAX = 0, sumAY = 0, sumAZ = 0;  // Store accel values
   int validSamples = 0;
   delay(500);   // Let sensors settle
 
@@ -355,15 +361,19 @@ void calibrate() {
   }
 
   // Average offsets
-  gx_offset = (float)sumX / validSamples;
-  gy_offset = (float)sumY / validSamples;
-  gz_offset = (float)sumZ / validSamples;
+  gx_offset = (float)sumGX / validSamples;
+  gy_offset = (float)sumGY / validSamples;
+  gz_offset = (float)sumGZ / validSamples;
 
   
-  ax = (float)sumX / validSamples / 8192;
-  ay = (float)sumY / validSamples / 8192;
-  az = (float)sumZ / validSamples / 8192;
+  ax = (float)sumAX / validSamples / 8192;
+  ay = (float)sumAY / validSamples / 8192;
+  az = (float)sumAZ / validSamples / 8192;
 
+  // Calculate Aproximate angles
+  float PitchAngle = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / PI;
+  float RollAngle = atan2f(ay, sqrtf(ay*ay + az*az)) * 180.0f / PI; 
+  // reference accZInertial, as said -> not 1g in our case
   baselineAccZInertial = -sin(PitchAngle*(PI/180))*ax+cos(PitchAngle*(PI/180))*sin(RollAngle*(PI/180))* ay+cos(PitchAngle*(PI/180))*cos(RollAngle*(PI/180))*az; 
 
   // reference for relative altitude
@@ -468,31 +478,33 @@ float kalmanUpdateB(KalmanB &k, float acc_meas, float v_baro, float dt) {
 
 // Update Target angles, angular velocities, and angular accerlaration
 void getTarget(){
-  Pot2 = ((float)data.pot2 / 255.0f ) * 5.0f + 1.0f;  // [1,6]
-  target.pitchAngle = ((float)data.j2PotX / 254.0f ) * 10.0f - 5.0f;  // [-5,5]
-  target.pitchAngle *= Pot2;  // [-30,30] <- [5,30]
+  float Pot2 = ((float)data.pot2 / 51.0f ) + 1.0f;  // [1,6]
+  target.pitchAngle = ((float)data.j2PotX / 25.5f ) - 5.0f;  // [-5,5] deg <- min
+  target.pitchAngle *= Pot2;                                 // [-30,30] deg <- max
 
-  target.rollAngle = ((float)data.j2PotY / 254.0f ) * 10.0f - 5.0f;  // [-5,5]
-  target.rollAngle *= Pot2;  // [-30,30] <- [5,30]
+  target.rollAngle = ((float)data.j2PotY / 25.5f ) - 5.0f;  // [-5,5] deg <- min
+  target.rollAngle *= Pot2;                                 // [-30,30] deg <- max
 
-  target.pitchRate = (float)Pot2*12.0f + 18.0f;  // [30, 90]
-  target.rollRate = (float)Pot2*12.0f + 18.0f;  // [30,90]
+  target.pitchRate = (float) Pot2 * 12.0f + 18.0f;   // [30, 90] deg/sec
+  target.rollRate  = (float) Pot2 * 12.0f + 18.0f;   // [30, 90] deg/sec
 
-  Pot1 = ((float)data.pot1 / 255.0f ); // [0,1]
-  target.yawRate = ((float)data.j1PotY / 254.0f ) * 40.0f - 20.0f;  // [-20,20]
-  target.yawRate *= (float)(Pot1 * 2.75f + 1.0f);  // [-75,75] <- [20,75]
+  float Pot1 = ((float)data.pot1 / 28.333f ) + 1; // [1,10]
+  target.yawRate = ((float)data.j1PotY / 6.375f ) - 20.0f;  // [-20,20] deg/sec <- min
+  target.yawRate *= (float)(Pot1 * 0.3 + 0.7f);             // [-74,74] deg/sec <- max
 
-  target.vVelocity = ((float)data.j1PotX / 254.0f ) * 0.6 - 0.3;  // [-0.3,0.3] m/s
-  target.vVelocity *= (float)( Pot1 * 9 + 1 ) ;  // [-3,3] <- [0.3, 3] m/s
+  target.vVelocity = ((float)data.j1PotX / 425.0f ) - 0.3;  // [-0.3,0.3] m/s <- min
+  target.vVelocity *= (float) Pot1;                         // [-3,3 ]    m/s <- max
   
   target.pitchAcc = (float)Pot2 * 12.0f + 48.0f;  // [60, 120]
-  target.rollAcc = (float)Pot2 * 12.0f + 48.0f;  // [60,120]
-  target.yawAcc = (float)Pot1 * 60.0f + 40.0f;  // [40, 100]
-  target.Acc = (float)Pot1 * 4.0f + 0.4f; // [0.4, 4.4] m/s2
+  target.rollAcc  = (float)Pot2 * 12.0f + 48.0f;  // [60,120]
+  target.yawAcc   = (float)Pot1 * 7.0f + 30.0f;  // [37, 100]
+  target.Acc      = (float)Pot1 * 0.4; // [0.4, 4.0] m/s2
 
-  if(bring_down){
-    target.vVelocity = -1 * filteredAltitude / 3.0f ;
-    target.Acc = 2.5f;
+  if(bringDown){
+    target.vVelocity = -0.1f * lastAltitude;
+    if(lastAltitude < 5) target.vVelocity = -0.3;
+    else if (lastAltitude < 1) target.vVelocity = -0.1;
+    target.Acc = 0.4f;
   }
 
 }
@@ -614,7 +626,7 @@ void setup(){
       delay(500);
       digitalWrite(led_r, LOW);
       delay(500);
-      digitalWrite(led_r, High);
+      digitalWrite(led_r, HIGH);
     }
   }
 
@@ -633,20 +645,21 @@ void setup(){
   }
 
   // Calibrate
-  calibrateGyro();
-  while()
+  calibrate();
+  armESC();
+  digitalWrite(led_g, HIGH);
+  digitalWrite(led_r, LOW);
 
+  ringBuzzerFor = 1500;
+  read_receiver();
+  delay(1500);          // 1500 delay for buzzer ring
+
+  loop_0 = loop_1 = loop_baro = micros();
 }
 
+void loop(){
 
-
-
-
-
-
-
-
-
+}
 
 
 
