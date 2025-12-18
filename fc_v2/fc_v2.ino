@@ -1,22 +1,22 @@
 // Flight Controller v2 by Rahul Kumar
 
 // Libraries
-#include <Wire.h>
-#include <RF24.h>
-#include <Servo.h>
-#include <math.h>
-#include <stdint.h>
-#include <Adafruit_BMP280.h>
+#include <Wire.h>             // for MPU
+#include <RF24.h>             // for NRF24L01
+#include <Servo.h>            // for esc
+#include <math.h>             // utilities
+#include <stdint.h>           // utilities
+#include <Adafruit_BMP280.h>  // bmp
 
 // Addresses for I2C
-#define MPU_ADDR 0x68
+#define MPU_ADDR 0x68 // MPU address
 #define BMP_ADDR 0x76 // try 0x77 for older bmp 280
 
 // Arudino Pins
-#define led_g 3
-#define led_r 4
-#define ce 7
-#define csn 8
+#define led_g 3   // green led
+#define led_r 4   // red led
+#define ce 7      // CE pin of NRF
+#define csn 8     // CSN pin of NRF
 
 // Motor Pins
 #define fr 5   // front right
@@ -25,9 +25,9 @@
 #define bl 10  // back left
 
 // Loops Time
-#define LOOP_0 2000 // ESC and gyro // 1_000_000 / 500 = 2_000US
-#define LOOP_1 10000 // Acc angle calc and RC input receive // 1_000_000 / 100 = 10_000
-#define LOOP_Baro 40000 // 1_000_000 / 25 = 40_000
+#define LOOP_0 2000     // ESC and gyro timer // 1_000_000 / 500 = 2_000US
+#define LOOP_1 10000    // Acc angle calc and RC input receive timer // 1_000_000 / 100 = 10_000
+#define LOOP_Baro 40000 // baro timer // 1_000_000 / 25 = 40_000
 
 // Adafruit Barometer Object
 Adafruit_BMP280 bmp;
@@ -42,8 +42,8 @@ Servo escFL, escFR, escBL, escBR;
 struct KalmanA, KalmanB, Data_Package, Target;
 
 // NRF24L01 radio (micros)
-unsigned long lastReceiveTimeRadio = 0, currentTimeRadio = 0;
-int16_t ringBuzzerFor = 0;  // How long to ring buzzer
+unsigned long lastReceiveTimeRadio = 0; // last radio received time
+int16_t ringBuzzerFor = 0;              // How long to ring buzzer
 
 // Raw IMU (MPU  6050)  sensor storage (int16_t)
 int16_t raw_ax = 0, raw_ay = 0, raw_az = 0; // accel
@@ -54,7 +54,7 @@ float ax = 0.0f, ay = 0.0f, az = 0.0f; // accel in g
 float gx = 0.0f, gy = 0.0f, gz = 0.0f; // gyro in deg/s
 
 // Gyro  and Acc Offsets (raw)
-int16_t gx_offset = -151, gy_offset = -3, gz_offset = -39;
+int16_t gx_offset = 0, gy_offset = 0, gz_offset = 0;
 int16_t ax_offset = 137, ay_offset = -181, az_offset = -1346; // update later if needed
 
 // Downward Inertial acceleration and it's Baseline Acceleration
@@ -199,10 +199,10 @@ void read_receiver() {
 
 
 // begin BMP
-void beginBMP(){
+bool beginBMP(){
   if(!bmp.begin(BMP_ADDR)){
     // Serial.print("BMP280 not found!");
-    return;
+    return false;
   }
 
   // Lower noise configuration
@@ -214,8 +214,8 @@ void beginBMP(){
     Adafruit_BMP280::STANDBY_MS_1   // ~1000 Hz loop
   );
   
+  return true;
 }
-
 
 // MPU utility
 void writeMPU(uint8_t reg, uint8_t val) {
@@ -226,11 +226,13 @@ void writeMPU(uint8_t reg, uint8_t val) {
 }
 
 // Set up registors and make MPU ready to read data
-void beginMPU(){
+bool beginMPU(){
   Wire.begin();
   Wire.setClock(400000); // faster I2C
   // Serial.begin(115200);
-  delay(100);
+  delay(200);
+
+  if(readRegister(MPU_ADDR, 0x75) != 0x68) return false;
 
   // Wake up
   writeMPU(0x6B, 0x00); // PWR_MGMT_1: clear sleep
@@ -250,6 +252,8 @@ void beginMPU(){
 
   delay(100);
 
+  return true;
+
 }
 
 // Read the raw data from MPU;
@@ -268,32 +272,83 @@ bool readMPUraw() {
 
   // Read as unsigned and combine to signed int16_t safely
   uint8_t hi, lo;
-  hi = Wire.read(); lo = Wire.read(); raw_ax = (int16_t)((hi << 8) | lo);
-  hi = Wire.read(); lo = Wire.read(); raw_ay = (int16_t)((hi << 8) | lo);
-  hi = Wire.read(); lo = Wire.read(); raw_az = (int16_t)((hi << 8) | lo);
+  hi = Wire.read(); lo = Wire.read(); raw_ax = (int16_t)((hi << 8) | lo) - ax_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_ay = (int16_t)((hi << 8) | lo) - ay_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_az = (int16_t)((hi << 8) | lo) - az_offset;
   // temp high/low (skip)
   (void)Wire.read(); (void)Wire.read();
-  hi = Wire.read(); lo = Wire.read(); raw_gx = (int16_t)((hi << 8) | lo);
-  hi = Wire.read(); lo = Wire.read(); raw_gy = (int16_t)((hi << 8) | lo);
-  hi = Wire.read(); lo = Wire.read(); raw_gz = (int16_t)((hi << 8) | lo);
+  hi = Wire.read(); lo = Wire.read(); raw_gx = (int16_t)((hi << 8) | lo) - gx_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gy = (int16_t)((hi << 8) | lo) - gy_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gz = (int16_t)((hi << 8) | lo) - gz_offset;
 
   return true;
 }
 
+// Read gyro
+bool readGyroRaw(){
+  // Start reading at GYRO_XOUT_H (0x43) and request 6 bytes
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x43); // GYRO_XOUT_H
+  if (Wire.endTransmission(false) != 0){
+    return false;
+  } // non-zero = error
+
+  uint8_t available = Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)6, (uint8_t)true);
+  if (available < 6){
+    return false;
+  }
+
+  // Read as unsigned and combine to signed int16_t safely
+  uint8_t hi, lo;
+  hi = Wire.read(); lo = Wire.read(); raw_gx = (int16_t)((hi << 8) | lo) - gx_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gy = (int16_t)((hi << 8) | lo) - gy_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gz = (int16_t)((hi << 8) | lo) - gz_offset;
+
+  return true;
+}
+
+bool readAccelRaw(){
+  // Start reading at ACCEL_XOUT_H (0x3B) and request 6 bytes
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B); // ACCEL_XOUT_H
+  if (Wire.endTransmission(false) != 0){
+    return false;
+  } // non-zero = error
+
+  uint8_t available = Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)6, (uint8_t)true);
+  if (available < 6){
+    return false;
+  }
+
+  // Read as unsigned and combine to signed int16_t safely
+  uint8_t hi, lo;
+  hi = Wire.read(); lo = Wire.read(); raw_gx = (int16_t)((hi << 8) | lo) - ax_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gy = (int16_t)((hi << 8) | lo) - ay_offset;
+  hi = Wire.read(); lo = Wire.read(); raw_gz = (int16_t)((hi << 8) | lo) - az_offset;
+
+  return true;
+}
 
 // calculates the gyro offsets and set baseline pressure from baro
-void calibrateGyro() {
+void calibrate() {
+  // Gyro Calibration
   const int calSamples = 2000;
-  long sumX = 0, sumY = 0, sumZ = 0;
+  long sumGX = 0, sumGY = 0, sumGZ = 0;  // Store gyrro values
+  long sumAX = 0, sumAY = 0, sumAZ = 0;  // Store gyrro values
   int validSamples = 0;
   delay(500);   // Let sensors settle
 
   // Collect samples
   while (validSamples < calSamples) {
     if (readMPUraw()) {          // Only use valid readings
-      sumX += raw_gx;
-      sumY += raw_gy;
-      sumZ += raw_gz;
+      sumGX += raw_gx;
+      sumGY += raw_gy;
+      sumGZ += raw_gz;
+
+      sumAX += raw_ax;
+      sumAY += raw_ay;
+      sumAZ += raw_az;
+
       validSamples++;
     }
     delay(1);
@@ -303,6 +358,13 @@ void calibrateGyro() {
   gx_offset = (float)sumX / validSamples;
   gy_offset = (float)sumY / validSamples;
   gz_offset = (float)sumZ / validSamples;
+
+  
+  ax = (float)sumX / validSamples / 8192;
+  ay = (float)sumY / validSamples / 8192;
+  az = (float)sumZ / validSamples / 8192;
+
+  baselineAccZInertial = -sin(PitchAngle*(PI/180))*ax+cos(PitchAngle*(PI/180))*sin(RollAngle*(PI/180))* ay+cos(PitchAngle*(PI/180))*cos(RollAngle*(PI/180))*az; 
 
   // reference for relative altitude
   baselinePressure = bmp.readPressure() / 100;  // HPa
@@ -403,14 +465,6 @@ float kalmanUpdateB(KalmanB &k, float acc_meas, float v_baro, float dt) {
     return k.velocity;
 }
 
-// Initiate Kalman Filters for both axes and vertical velocity
-void initalKalmanFilter(){
-  // --- Init Kalman filters ---
-  kalmanInitA(kalRoll);
-  kalmanInitA(kalPitch);
-  kalmanInitB(kalVel);
-}
-
 
 // Update Target angles, angular velocities, and angular accerlaration
 void getTarget(){
@@ -449,22 +503,8 @@ void getTarget(){
 // radio failure check 
 void errChk(){
   if(!radio.isChipConnected() || radio.failureDetected || radio.getDataRate() != RF24_250KBPS){
-    
     radio.failureDetected = 0;
-
-    radio.begin();
-
-    radio.setChannel(76);
-    radio.setDataRate(RF24_250KBPS);
-    radio.setPALevel(RF24_PA_LOW);
-
-    radio.setAutoAck(true);
-    radio.enableAckPayload();
-    radio.enableDynamicPayloads();
-
-    radio.openReadingPipe(0, address);
-    radio.startListening(); //  Set the module as receiver
-    resetData();
+    startListening();
   }
 }
 
@@ -543,6 +583,60 @@ void armESC(){
 }
 
 
+
+void setup(){
+  // Serial.begin(9600);
+
+  // LEDs
+  pinMode(led_g, OUTPUT);   // Green
+  digitalWrite(led_g, LOW);
+
+  pinMode(led_r, OUTPUT);   // Red
+  digitalWrite(led_r, HIGH);
+
+  startListening();
+
+  bool mpu_ok = false;
+  bool bmp_ok = false;
+
+  for(int i = 0; i < 10; i++){
+    mpu_ok = beginMPU();
+    bmp_ok = beginBMP();
+
+    if(mpu_ok && bmp_ok) break;
+    delay(50);
+  }
+
+  if(!mpu_ok || !bmp_ok || !radio.isChipConnected()){
+    Serial.print("Sensor Bad");
+    
+    while(1){
+      delay(500);
+      digitalWrite(led_r, LOW);
+      delay(500);
+      digitalWrite(led_r, High);
+    }
+  }
+
+
+  // --- Initiate Kalman filters ---
+  kalmanInitA(kalRoll);
+  kalmanInitA(kalPitch);
+  kalmanInitB(kalVel);
+
+
+  // Arm check
+  while(true){
+    read_receiver();
+    if(data.tSwitch1) break;  // armed
+    delay(500);
+  }
+
+  // Calibrate
+  calibrateGyro();
+  while()
+
+}
 
 
 
