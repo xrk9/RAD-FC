@@ -26,8 +26,8 @@
 
 // Loops Time
 #define LOOP_0 2000     // ESC and gyro timer // 1_000_000 / 500 = 2_000US
-#define LOOP_1 10000    // Acc angle calc and RC input receive timer // 1_000_000 / 100 = 10_000
-#define LOOP_Baro 40000 // baro timer // 1_000_000 / 25 = 40_000
+#define LOOP_1 10000    // Angle Kalman (Accel Reading) and RC input receive timer // 1_000_000 / 100 = 10_000
+#define LOOP_BARO 40000 // ZInertial velocity Kalamn (Baro Reading) // 1_000_000 / 25 = 40_000
 
 // Adafruit Barometer Object
 Adafruit_BMP280 bmp;
@@ -238,7 +238,20 @@ bool beginMPU(){
   // Serial.begin(115200);
   delay(200);
 
-  if(Wire.read(MPU_ADDR, 0x75) != 0x68) return false;
+  // if(Wire.read(MPU_ADDR, 0x75) != 0x68) return false;
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x75);
+  if (Wire.endTransmission(false) != 0){
+    return false;
+  } // non-zero = error
+
+  uint8_t available = Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)1, (uint8_t)true);
+  if (available < 1){
+    return false;
+  }
+
+  if(Wire.read() != 0x68) return false;
+
 
   // Wake up
   writeMPU(0x6B, 0x00); // PWR_MGMT_1: clear sleep
@@ -501,9 +514,9 @@ void getTarget(){
   target.Acc      = (float)Pot1 * 0.4; // [0.4, 4.0] m/s2
 
   if(bringDown){
-    target.vVelocity = -0.1f * lastAltitude;
     if(lastAltitude < 5) target.vVelocity = -0.3;
     else if (lastAltitude < 1) target.vVelocity = -0.1;
+    else target.vVelocity = -0.2f * lastAltitude;
     target.Acc = 0.4f;
   }
 
@@ -512,50 +525,7 @@ void getTarget(){
 
 // 3 parts of get tele, gyro separate, accel separate, and baro separate
 
-// radio failure check 
-void errChk(){
-  if(!radio.isChipConnected() || radio.failureDetected || radio.getDataRate() != RF24_250KBPS){
-    radio.failureDetected = 0;
-    startListening();
-  }
-}
 
-// [target.angle, kalman_angle, updated_rates, target.rates, target.acc] -> NULL
-void provide_w_max(float des, float cur, float at, float need, float acc){
-  angleErr = des - cur;
-  w_max = sign(angleErr) * fminf(sqrt(2*acc*fabsf(angleErr)) , need);
-  rateErr = w_max - at;
-}
-
-// provides the milis valuees for esc
-void get_milis(){
-  
-  // for pitch 
-  provide_w_max(target.pitchAngle, PitchAngle, pitchRate, target.pitchRate, target.pitchAcc);
-  if (fabsf(rateErr) > 4.0f || fabsf(angleErr) > 3.0f){
-    pitch += Kp * ( target.pitchAcc / 120 ) * rateErr;
-  } else pitch = 0.0f;
-
-  // for roll
-  provide_w_max(target.rollAngle, RollAngle, rollRate, target.rollRate, target.rollAcc);
-  if (fabsf(rateErr) > 4.0f || fabsf(angleErr) > 3.0f){
-    roll += Kr * ( target.rollAcc / 120 ) * rateErr;
-  } else roll = 0.0f;
-
-  // for yaw
-  rateErr = target.yawRate - yawRate;
-  if (fabsf(rateErr) > 5.0f ){
-    yaw += Ky * ( target.yawAcc / 100 ) * rateErr;
-  }else yaw = 0.0f;
-
-  // for throttle
-  rateErr = target.velocity - xv/1000;
-  if (fabs(rateErr) > 5){
-    throttle += Kt * ( target.Acc / 4.4 ) * rateErr;
-  }
-
-
-}
 
 // clamp valuese in closed range [1035,1965]
 int clamp(float v) {
@@ -611,14 +581,17 @@ void setup(){
   bool mpu_ok = false;
   bool bmp_ok = false;
 
+  // 10 retires for each if initialization fails
   for(int i = 0; i < 10; i++){
-    mpu_ok = beginMPU();
-    bmp_ok = beginBMP();
+    if(!mpu_ok) mpu_ok = beginMPU();
+    if(!bmp_ok) bmp_ok = beginBMP();
+    if(!radio.isChipConnected()) startListening();
 
-    if(mpu_ok && bmp_ok) break;
+    if(mpu_ok && bmp_ok && radio.isChipConnected()) break;
     delay(50);
   }
 
+  // if still not initialized, raise error
   if(!mpu_ok || !bmp_ok || !radio.isChipConnected()){
     Serial.print("Sensor Bad");
     
@@ -647,7 +620,7 @@ void setup(){
   // Calibrate
   calibrate();
   armESC();
-  digitalWrite(led_g, HIGH);
+  digitalWrite(led_g, HIGH);  // ready for takeoff
   digitalWrite(led_r, LOW);
 
   ringBuzzerFor = 1500;
@@ -658,7 +631,23 @@ void setup(){
 }
 
 void loop(){
+  unsigned long now = micros();
 
+  // 25Hz loop - Baro Kalman
+  if((now-loop_baro) >= 0){
+    loop_baro += LOOP_BARO;
+
+    // Read Baro
+    
+  }
+
+  
+  // Inner 500Hz loop
+  if((now - loop_0) >= 0){
+    loop_0 += LOOP_0;
+
+
+  }
 }
 
 
