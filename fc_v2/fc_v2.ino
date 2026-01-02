@@ -1,5 +1,9 @@
 // Flight Controller v2 by Rahul Kumar
 // Project RAD-1
+// This is a high frequecy flight controller loop running at 500Hz 
+// It performs several float operation which makes it harder for ATMega328P @ 16MHz to run this loop without any FPU at this frequency
+// Biggest hit coming from matrix multiplication in the Kalman filters, it can itself take upto thousands of CPU cycles
+// The net inner frequency would be around 250Hz for ATMega328P, disturbing our math, coz dt increases
 
 // Libraries
 #include <Wire.h>             // for MPU communication
@@ -36,15 +40,18 @@
 
 
 // Constant Valuues - tune via PD testing
-#define KP_T 1.5
-#define KP_P 4
-#define KP_R 4
-#define KP_Y 2.5
+#define KP_T 85.94366926962349
+#define KP_P 229.1831180523293
+#define KP_R 229.1831180523293
+#define KP_Y 143.2394487827058
 
-#define KD_T 0.3
-#define KD_P 4
-#define KD_R 4
-#define KD_Y 0.02
+#define KI_T 10
+#define KI_P 10
+#define KI_R 10
+
+#define KD_T 17.1887338539247
+#define KD_P 229.1831180523293
+#define KD_R 229.1831180523293
 
 
 // Adafruit Barometer Object
@@ -59,9 +66,6 @@ unsigned long loop_0 = 0, loop_1 = 0, loop_baro = 0;
 
 // Last Loop Timer (micros)
 unsigned long last_0 = 0, last_1 = 0, last_baro = 0; // last time for loop_0, loop_1 and loop_baro respectively at 500, 100, 25Hz respectively
-
-// dt time
-double dt_accel = 0.0d, dt_gyro = 0.0d;
 
 
 // Struct Declaration
@@ -95,6 +99,10 @@ float baselineAccZInertial = 0.0f;   // The Inertial Acceleration value when ver
 // Angle and Vertical Velocity
 float rollAngle = 0.0f, pitchAngle = 0.0f;
 float verticalSpeed = 0.0f;
+
+
+// Memory : Integral values
+float p_mem = 0.0f, r_mem = 0.0f, y_mem = 0.0f, t_mem = 0.0f;
 
 
 // Barometer
@@ -451,9 +459,9 @@ void calibrate() {
   }
 
   // Average offsets
-  gx_offset = (float)sumGX / validSamples;
-  gy_offset = (float)sumGY / validSamples;
-  gz_offset = (float)sumGZ / validSamples;
+  gx_offset = (int16_t)round((float)sumGX / validSamples);
+  gy_offset = (int16_t)round((float)sumGY / validSamples);
+  gz_offset = (int16_t)round((float)sumGZ / validSamples);
 
   
   float ax = (float)sumAX / validSamples / 8192;
@@ -511,6 +519,7 @@ void kalmanInitB(KalmanB &k) {
 }
 
 // returns kalman updated angle (deg)
+// Useless in our case
 float kalmanUpdateA(KalmanA &k, float newRate, float newAngle, float dt) {
 
   // Predict
@@ -546,7 +555,47 @@ float kalmanUpdateA(KalmanA &k, float newRate, float newAngle, float dt) {
 
 }
 
+// Only prediction part
+float kalmanPredictA(KalmanA &k, float gyro, float dt) {
+
+  float rate = gyro - k.bias;
+  k.angle += dt * rate;
+
+  k.P[0][0] += dt * (dt*k.P[1][1] - k.P[0][1] - k.P[1][0] + k.Q_angle);
+  k.P[0][1] -= dt * k.P[1][1];
+  k.P[1][0] -= dt * k.P[1][1];
+  k.P[1][1] += k.Q_bias * dt;
+
+  return k.angle;
+
+}
+
+// Correction part
+void kalmanCorrectA(KalmanA &k, float accelAngle) {
+
+  float y = accelAngle - k.angle;
+  float S = k.P[0][0] + k.R_measure;
+  if (S < 1e-6f) return;
+
+  float K0 = k.P[0][0] / S;
+  float K1 = k.P[1][0] / S;
+
+  float P00 = k.P[0][0];
+  float P01 = k.P[0][1];
+
+  k.angle += K0 * y;
+  k.bias  += K1 * y;
+
+  k.P[0][0] -= K0 * P00;
+  k.P[0][1] -= K0 * P01;
+  k.P[1][0] -= K1 * P00;
+  k.P[1][1] -= K1 * P01;
+
+}
+
+
 // returns kalman updated vertical velocity
+// Useless in our case
 float kalmanUpdateB(KalmanB &k, float acc_meas, float v_baro, float dt) {
 
     // ----- PREDICT -----
@@ -585,6 +634,44 @@ float kalmanUpdateB(KalmanB &k, float acc_meas, float v_baro, float dt) {
     return k.velocity;
 
 }
+
+// Only prediction part
+float kalmanPredictB(KalmanB &k, float acc, float dt) {
+
+  k.velocity += (acc - k.bias) * dt;
+
+  k.P[0][0] += -dt*(k.P[0][1] + k.P[1][0]) + dt*dt*k.P[1][1] + k.Q_velocity;
+  k.P[0][1] -= dt * k.P[1][1];
+  k.P[1][0] -= dt * k.P[1][1];
+  k.P[1][1] += k.Q_bias;
+
+  return k.velocity;
+
+}
+
+// Only correction part
+void kalmanCorrectB(KalmanB &k, float v_baro) {
+
+  float y = v_baro - k.velocity;
+  float S = k.P[0][0] + k.R_baro;
+  if (S < 1e-6f) return;
+
+  float K0 = k.P[0][0] / S;
+  float K1 = k.P[1][0] / S;
+
+  float P00 = k.P[0][0];
+  float P01 = k.P[0][1];
+
+  k.velocity += K0 * y;
+  k.bias     += K1 * y;
+
+  k.P[0][0] -= K0 * P00;
+  k.P[0][1] -= K0 * P01;
+  k.P[1][0] -= K1 * P00;
+  k.P[1][1] -= K1 * P01;
+
+}
+
 
 
 // Update Target angles, angular velocities, and angular accerlaration
@@ -906,12 +993,12 @@ void loop(){
       float accZInertial = -sin ( pitchAng ) * filax + cos( pitchAng ) * sin ( rollAng ) * filay + cos ( pitchAng ) * cos ( rollAng ) * filaz;
       accZInertial = (accZInertial - baselineAccZInertial) * 9.81;
 
-      // Update Kalman filters (deg)
-      rollAngle = kalmanUpdateA(kalRoll, last_gx, rollAng, dt_gyro);
-      pitchAngle = kalmanUpdateA(kalPitch, last_gy, pitchAng, dt_gyro);
+      // Correct Kalman filters (deg)
+      kalmanCorrectA(kalRoll, rollAng);
+      kalmanCorrectA(kalPitch, pitchAng);
 
-      verticalSpeed += (accZInertial - kalVel.bias) * dt;
-      dt_accel = dt;
+      // Predict vertical speed
+      kalmanPredictB(kalVel, accZInertial, dt);
 
     }else{
 
@@ -944,19 +1031,10 @@ void loop(){
       lastAltitude = curr_fil;
 
       float vel_raw = (curr_fil - last_alt) / dt;
-      float vel_fil = pt1(verticalSpeed, vel_raw, dt, 3.0f);
+      float vel_fil = pt1(kalVel.velocity, vel_raw, dt, 3.0f);
 
-      float pitchAng = pitchAngle;
-      float rollAng = rollAngle;
-
-      float ax = last_ax;
-      float ay = last_ay;
-      float az = last_az;
-
-      float accZInertial = -sin (pitchAng ) *ax+cos(pitchAng ) * sin(rollAng ) * ay + cos(pitchAng ) * cos(rollAng ) * az;
-      accZInertial = (accZInertial - baselineAccZInertial) * 9.81;
-
-      verticalSpeed =  kalmanUpdateB(kalVel, accZInertial, vel_fil, dt_accel);
+      // Correct kalman vertical speed
+      kalmanCorrectB(kalVel, vel_fil);
 
     }else{
 
@@ -986,9 +1064,6 @@ void loop(){
     float gy = (float) raw_gy * 0.001064225153689f;
     float gz = (float) raw_gz * 0.001064225153689f;
 
-    gx = gx - kalRoll.bias;
-    gy = gy - kalPitch.bias;
-
     if(dt <= 0.006 && dt > 0){
       
       float fil_gx = pt1(last_gx, gx, dt, 100);
@@ -999,37 +1074,62 @@ void loop(){
       last_gy = fil_gy;
       last_gz = fil_gz;
 
-      rollAngle += fil_gx * dt;
-      pitchAngle += fil_gy * dt;
+      // Predict the angles
+      kalmanPredictA(kalRoll, fil_gx, dt);
+      kalmanPredictA(kalPitch, fil_gy, dt);
 
-      dt_gyro = dt;
+
 
       // Flight Controller
 
+
       // Pitch
-      float pitch_omega;
-
-      float pitch_error = target.pitchAngle - pitchAngle;
-      if( fabsf(pitch_error) > 1){
-
-        pitch_omega = control_loop(pitch_error, target.pitchAcc, target.pitchRate, fil_gx, dt);
+      float pitch_omega = 0.0f;  // Pitch command
+      float d_pitchh = 0.0f;     // D term
       
-      } else pitch_omega = 0.0f;
+      // Error
+      float pitch_error = target.pitchAngle - kalPitch.angle;
 
-      float pitch = (pitch_omega - fil_gx) * KP_P - KD_P * fil_gx;
+      if( fabsf(pitch_error) > 1){
+        
+        // P term
+        pitch_omega = control_loop(pitch_error, target.pitchAcc, target.pitchRate, fil_gx, dt);
+
+        // D term
+        d_pitch = pitch_error / dt;
+
+      }
+
+      // I term
+      float p_step = pitch_error * dt;
+      float p_mem_potential = p_mem + p_step;
+
+      float pitch = (pitch_omega - fil_gx) * KP_P + KI_P * p_mem_potential - KD_P * d_pitch;
       
 
       // Roll
-      float roll_omega;
+      float roll_omega = 0.0f;
+      float d_roll = 0.0f;
+      
+      // Error
+      float roll_error = target.rollAngle - kalRoll.angle;
 
-      float roll_error = target.rollAngle - rollAngle;
+      // P term
       if( fabsf(roll_error) > 1){
 
+        // P term
         roll_omega = control_loop(roll_error, target.rollAcc, target.rollRate, fil_gy, dt);
-      
-      } else roll_omega = 0.0f;
 
-      float roll = (roll_omega - fil_gy) * KP_R - KD_R * fil_gy;
+        // D term
+        d_roll = roll_error / dt;
+
+      }
+
+      // I term
+      float r_step = roll_error * dt;
+      float r_mem_potential = r_mem + r_step;
+
+      float roll = (roll_omega - fil_gy) * KP_R + KI_R * r_mem__potential - KD_R * d_roll;
 
 
       // Yaw
@@ -1050,15 +1150,18 @@ void loop(){
       
       } else yaw_cmd = 0.0f;
       
-      float yaw = KP_Y * (yaw_cmd - fil_gz) - KD_Y * (fil_gz);
+      float yaw = KP_Y * (yaw_cmd - fil_gz);
 
 
       // Vertical velocity
-      float vz;
+      float vz = 0.0f;
+      float d_vel = 0.0f;
 
       float target_vz = target.vVelocity;
-      float now = verticalSpeed;
-      float vz_error = target_vz - now;
+      float vz_now = kalVel.velocity;
+
+      // Error
+      float vz_error = target_vz - vz_now;
 
       if(fabsf(vz_error) > 0.15) {
 
@@ -1066,13 +1169,18 @@ void loop(){
         if(vz_error > max_vz_error) vz_error = max_vz_error;
         if(vz_error < -max_vz_error) vz_error = -max_vz_error;
 
-        vz = now + vz_error;
+        // P term
+        vz = vz_now + vz_error;
         if(vz > target_vz) vz = target_vz;
         if(vz < -target_vz) vz = -target_vz;
+        
+        // D term
+
+        d_vel = vz_error / dt;
       
-      } else vz = 0.0f;
+      }
      
-      float throttle = KP_T * (vz - now) - KD_T * (now);
+      float throttle = KP_T * (vz - vz_now) - KD_T * (vz_now);
 
       
       // feeding values to escs'
@@ -1096,5 +1204,3 @@ void loop(){
 
 
 
-
-// -Over-
