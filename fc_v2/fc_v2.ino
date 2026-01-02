@@ -1085,7 +1085,7 @@ void loop(){
 
       // Pitch
       float pitch_omega = 0.0f;  // Pitch command
-      float d_pitchh = 0.0f;     // D term
+      float d_pitch = 0.0f;     // D term
       
       // Error
       float pitch_error = target.pitchAngle - kalPitch.angle;
@@ -1129,7 +1129,7 @@ void loop(){
       float r_step = roll_error * dt;
       float r_mem_potential = r_mem + r_step;
 
-      float roll = (roll_omega - fil_gy) * KP_R + KI_R * r_mem__potential - KD_R * d_roll;
+      float roll = (roll_omega - fil_gy) * KP_R + KI_R * r_mem_potential - KD_R * d_roll;
 
 
       // Yaw
