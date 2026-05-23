@@ -277,10 +277,10 @@ void read_receiver() {
   unsigned long currentTimeRadio = millis();
 
   // failsafe and bring down
-  if (currentTimeRadio - lastTimeRadio > 1000) {
+  if (currentTimeRadio - lastReceiveTimeRadio > 1000) {
     resetData();
 
-    if (currentTimeRadio - lastTimeRadio > 6000) {
+    if (currentTimeRadio - lastReceiveTimeRadio > 6000) {
       bringDown = true;
     }
   }
@@ -862,7 +862,12 @@ void loop(){
 
       while(true){
         read_receiver();
-        if (data.tSwitch1) break;
+        if (data.tSwitch1) {
+           loop_0 = micros();
+           loop_1 = micros();
+           loop_baro = micros();
+           break;
+        }
       }
 
     }
@@ -1101,8 +1106,8 @@ void loop(){
       int maxMotor = max(max(mFR, mBR), max(mBL, mFL));
       int minMotor = min(min(mFR, mBR), min(mBL, mFL));
 
-      bool highSat = (maxMotor > 1970);
-      bool lowSat  = (minMotor < 1030);
+      bool highSat = (maxMotor > 1950);
+      bool lowSat  = (minMotor < 1050);
 
 
       // ---- Per-axis Dynamic Anti-Windup ----
