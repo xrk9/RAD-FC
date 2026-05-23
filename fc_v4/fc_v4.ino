@@ -458,12 +458,12 @@ void calibrate() {
   float ay = (float)sumAY / validSamples / 4096;
   float az = (float)sumAZ / validSamples / 4096;
 
-  // Calculate approximate resting angles
-  float PitchAngle = atan2f(-ax, sqrtf(ay*ay + az*az));
-  float RollAngle  = atan2f( ay, sqrtf(ax*ax + az*az));
+  // Calculate approximate resting angles (Standard Aero mapping)
+    float PitchAngle = atan2f(-ax, sqrtf(ay*ay + az*az));
+    float RollAngle  = atan2f(ay, az); 
 
-  // Reference inertial Z acceleration at rest (removes mounting tilt from baseline)
-  baselineAccZInertial = -sinf(PitchAngle)*ax
+    // Reference inertial Z acceleration at rest (removes mounting tilt from baseline)
+    baselineAccZInertial = -sinf(PitchAngle)*ax
                         + cosf(PitchAngle)*sinf(RollAngle)*ay
                         + cosf(PitchAngle)*cosf(RollAngle)*az;
 
@@ -895,19 +895,20 @@ void loop(){
       last.ay = filay;
       last.az = filaz;
 
-      // Compute accel angles
-      float pitchAng = atan2f( filay, sqrtf(filax*filax + filaz*filaz));
-      float rollAng  = atan2f(-filax, sqrtf(filay*filay + filaz*filaz));
-
-      // Inertial vertical acceleration (remove gravity and mounting tilt)
-      float accZInertial = -sinf(pitchAng)*filax
-                          + cosf(pitchAng)*sinf(rollAng)*filay
-                          + cosf(pitchAng)*cosf(rollAng)*filaz;
-      accZInertial = (accZInertial - baselineAccZInertial) * 9.81f;
+      // Compute raw accel angles
+      float pitchAng = atan2f(-filax, sqrtf(filay*filay + filaz*filaz));
+      float rollAng  = atan2f(filay, filaz);
 
       // Correct angle Kalman filters with accel measurement
       kalmanCorrectA(kalRoll,  rollAng);
       kalmanCorrectA(kalPitch, pitchAng);
+
+      // Inertial vertical acceleration: Rotate body accel to earth frame
+      float accZInertial = -sinf(kalPitch.angle) * filax
+                         + cosf(kalPitch.angle) * sinf(kalRoll.angle) * filay
+                         + cosf(kalPitch.angle) * cosf(kalRoll.angle) * filaz;
+                         
+      accZInertial = (accZInertial - baselineAccZInertial) * 9.81f;
 
       // Predict vertical velocity with inertial accel
       kalmanPredictB(kalVel, accZInertial, dt);
